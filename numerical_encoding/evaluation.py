@@ -125,109 +125,171 @@ class NumericalEncodingEvaluator:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.encoder.to(self.device)
     
-    def evaluate_numerical_properties(self, loader: DataLoader) -> Dict[str, float]:
-        print("Evaluating numerical properties...")
-        all_numbers = []
-        all_embeddings = []
+    def evaluate_contextual_understanding(self, loader: DataLoader) -> Dict[str, float]:
+        print("Evaluating contextual understanding...")
+        # Initialize results dictionary with default values
+        results = {
+            'clustering_quality': 0.0,
+            'context_separation': 0.0,
+            'semantic_consistency': 0.0
+        }
         
-        for nums, _ in loader:
-            if nums is not None:
-                # Process each number individually
-                for num in nums.numpy():
+        try:
+            context_embeddings = {}
+            
+            # Define semantic test cases
+            semantic_test_cases = [
+                ("5 stars", "4 stars", "3 stars"),
+                ("$5", "$50", "$500"),
+                ("5 items", "50 items", "500 items"),
+                ("5 minutes", "50 minutes", "500 minutes"),
+                ("5%", "50%", "100%")
+            ]
+            
+            # Collect embeddings by context
+            for _, texts in loader:
+                if texts:
+                    for text in texts:
+                        if text is not None:
+                            try:
+                                embedding = self.encoder.encode_number(text)
+                                context = self._extract_context(text)
+                                if context not in context_embeddings:
+                                    context_embeddings[context] = []
+                                context_embeddings[context].append(
+                                    embedding.detach().cpu().numpy().squeeze()
+                                )
+                            except Exception as e:
+                                print(f"Error processing text {text}: {e}")
+                                continue
+
+            # 1. Context Clustering Quality
+            if context_embeddings:
+                all_embeddings = []
+                labels = []
+                for context, embeddings in context_embeddings.items():
+                    if embeddings:
+                        all_embeddings.extend(embeddings)
+                        labels.extend([list(context_embeddings.keys()).index(context)] * len(embeddings))
+                
+                if len(all_embeddings) > 0:
+                    all_embeddings = np.array(all_embeddings)
+                    labels = np.array(labels)
+                    
+                    if len(np.unique(labels)) > 1:
+                        kmeans = KMeans(
+                            n_clusters=len(context_embeddings),
+                            random_state=self.config.seed
+                        )
+                        pred_labels = kmeans.fit_predict(all_embeddings)
+                        
+                        results['clustering_quality'] = adjusted_rand_score(labels, pred_labels)
+                        results['context_separation'] = silhouette_score(all_embeddings, labels)
+            
+            # 2. Semantic Consistency
+            semantic_scores = []
+            for test_case in semantic_test_cases:
+                embeddings = []
+                for text in test_case:
                     try:
-                        embedding = self.encoder.encode_number(float(num))
-                        all_embeddings.append(embedding.detach().cpu().numpy())
-                        all_numbers.append(num)
+                        emb = self.encoder.encode_number(text)
+                        embeddings.append(emb.detach().cpu().numpy().squeeze())
                     except Exception as e:
-                        print(f"Error processing number {num}: {e}")
+                        print(f"Error processing test case text {text}: {e}")
                         continue
-        
-        if not all_numbers:
-            print("No numerical samples were successfully processed")
-            return {}
-        
-        all_numbers = np.array(all_numbers)
-        all_embeddings = np.array([e.squeeze() for e in all_embeddings])
-        
-        results = {}
-        
-        # Monotonicity preservation
-        embedding_norms = np.linalg.norm(all_embeddings, axis=1)
-        spearman_corr, _ = spearmanr(all_numbers, embedding_norms)
-        results['monotonicity'] = spearman_corr
-        
-        # Scale invariance
-        scale_factors = np.array([0.1, 10, 100])
-        scale_distances = []
-        for scale in scale_factors:
-            scaled_nums = all_numbers * scale
-            scaled_embs = []
-            for num in scaled_nums:
-                try:
-                    embed = self.encoder.encode_number(float(num))
-                    scaled_embs.append(embed.detach().cpu().numpy().squeeze())
-                except Exception as e:
-                    print(f"Error processing scaled number {num}: {e}")
-                    continue
-            if scaled_embs:
-                scaled_embs = np.array(scaled_embs)
-                scale_distances.append(np.mean(np.linalg.norm(scaled_embs - all_embeddings, axis=1)))
-        
-        if scale_distances:
-            results['scale_invariance'] = 1.0 / (1.0 + np.mean(scale_distances))
+                
+                if len(embeddings) == len(test_case):
+                    embeddings = np.array(embeddings)
+                    # Calculate pairwise cosine similarities
+                    similarities = np.zeros((len(embeddings), len(embeddings)))
+                    for i in range(len(embeddings)):
+                        for j in range(i+1, len(embeddings)):
+                            similarity = np.dot(embeddings[i], embeddings[j]) / (
+                                np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j])
+                            )
+                            similarities[i,j] = similarities[j,i] = similarity
+                    
+                    # Take average of upper triangle
+                    upper_tri = similarities[np.triu_indices(len(embeddings), k=1)]
+                    semantic_scores.append(np.mean(upper_tri))
+            
+            if semantic_scores:
+                results['semantic_consistency'] = np.mean(semantic_scores)
+
+        except Exception as e:
+            print(f"Error in contextual understanding evaluation: {e}")
         
         return results
 
-    def evaluate_contextual_understanding(self, loader: DataLoader) -> Dict[str, float]:
-        print("Evaluating contextual understanding...")
-        context_embeddings = {}
+    def evaluate_numerical_properties(self, loader: DataLoader) -> Dict[str, float]:
+        print("Evaluating numerical properties...")
+        # Initialize results with default values
+        results = {
+            'relative_distance': 0.0,
+            'scale_invariance': 0.0
+        }
         
-        for _, texts in loader:
-            if texts:  # Check if we have any text samples
-                for text in texts:
-                    if text is not None:
+        try:
+            all_numbers = []
+            all_embeddings = []
+            
+            for nums, _ in loader:
+                if nums is not None:
+                    for num in nums.numpy():
                         try:
-                            embedding = self.encoder.encode_number(text)
-                            context = self._extract_context(text)
-                            if context not in context_embeddings:
-                                context_embeddings[context] = []
-                            context_embeddings[context].append(
-                                embedding.detach().cpu().numpy().squeeze()
-                            )
+                            embedding = self.encoder.encode_number(float(num))
+                            all_embeddings.append(embedding.detach().cpu().numpy())
+                            all_numbers.append(num)
                         except Exception as e:
-                            print(f"Error processing text '{text}': {e}")
+                            print(f"Error processing number {num}: {e}")
                             continue
-        
-        if not context_embeddings:
-            print("No text samples were successfully processed")
-            return {}
             
-        results = {}
-        
-        # Prepare data for clustering
-        all_embeddings = []
-        labels = []
-        for context, embeddings in context_embeddings.items():
-            if embeddings:  # Check if we have embeddings for this context
-                all_embeddings.extend(embeddings)
-                labels.extend([list(context_embeddings.keys()).index(context)] * len(embeddings))
-        
-        if len(all_embeddings) > 0:
-            all_embeddings = np.array(all_embeddings)
-            labels = np.array(labels)
-            
-            if len(np.unique(labels)) > 1:
+            if all_numbers:
+                all_numbers = np.array(all_numbers)
+                all_embeddings = np.array([e.squeeze() for e in all_embeddings])
+                
+                # 1. Relative Distance Preservation
                 try:
-                    kmeans = KMeans(
-                        n_clusters=len(context_embeddings),
-                        random_state=self.config.seed
-                    )
-                    pred_labels = kmeans.fit_predict(all_embeddings)
-                    
-                    results['clustering_quality'] = adjusted_rand_score(labels, pred_labels)
-                    results['context_separation'] = silhouette_score(all_embeddings, labels)
+                    num_diffs = np.log1p(np.abs(all_numbers[:, np.newaxis] - all_numbers[np.newaxis, :]))
+                    emb_dists = np.linalg.norm(all_embeddings[:, np.newaxis] - all_embeddings[np.newaxis, :], axis=-1)
+                    rel_dist_corr, _ = spearmanr(num_diffs.flatten(), emb_dists.flatten())
+                    results['relative_distance'] = rel_dist_corr
                 except Exception as e:
-                    print(f"Error in clustering analysis: {e}")
+                    print(f"Error computing relative distance preservation: {e}")
+
+                # 2. Scale Invariance
+                try:
+                    scale_factors = np.array([0.01, 0.1, 1.0, 10.0, 100.0])
+                    scale_similarities = []
+                    base_embeddings = all_embeddings[:100]
+                    base_numbers = all_numbers[:100]
+                    
+                    for scale in scale_factors:
+                        scaled_embs = []
+                        for num in base_numbers * scale:
+                            try:
+                                embed = self.encoder.encode_number(float(num))
+                                scaled_embs.append(embed.detach().cpu().numpy().squeeze())
+                            except Exception as e:
+                                continue
+                                
+                        if scaled_embs:
+                            scaled_embs = np.array(scaled_embs)
+                            similarities = []
+                            for base_emb, scaled_emb in zip(base_embeddings, scaled_embs):
+                                similarity = np.dot(base_emb, scaled_emb) / (
+                                    np.linalg.norm(base_emb) * np.linalg.norm(scaled_emb)
+                                )
+                                similarities.append(similarity)
+                            scale_similarities.append(np.mean(similarities))
+                    
+                    if scale_similarities:
+                        results['scale_invariance'] = np.mean(scale_similarities)
+                except Exception as e:
+                    print(f"Error computing scale invariance: {e}")
+        
+        except Exception as e:
+            print(f"Error in numerical properties evaluation: {e}")
         
         return results
 
