@@ -1,0 +1,124 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env
+.venv
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.bak
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Distribution / packaging
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# PyBuilder
+target/
+
+# Transformer models and caches
+.transformer_cache/
+.torch/
+.pytorch/
+*.pth
+*.pt
+*.ckpt
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Data
+data/
+*.csv
+*.json
+*.jsonl
+*.txt
+!requirements.txt
+*.pkl
+*.h5
+
+# Output files
+outputs/
+results/
+figures/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+
+# Documentation
+docs/_build/
+_site/
+*.md.backup
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Other
+*.bak
+*.tmp
+*.temp
+*.swp
+.DS_Store
+ehthumbs.db
+Icon?
+Thumbs.db
