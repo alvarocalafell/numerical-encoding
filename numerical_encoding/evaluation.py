@@ -7,6 +7,9 @@ from scipy.stats import spearmanr, pearsonr
 import matplotlib.pyplot as plt
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+
 
 @dataclass
 class EvaluationConfig:
@@ -49,13 +52,20 @@ def custom_collate_fn(batch):
 class NumericalEncodingDataset(Dataset):
     def __init__(self, config: EvaluationConfig):
         self.config = config
+        
+        # Set seeds for ALL random number generators
+        torch.manual_seed(config.seed)
         np.random.seed(config.seed)
         
         # Generate samples
+        self._generate_data()
+        
+    def _generate_data(self):
+        """Generate and store all data at initialization"""
         self.numerical_data = self._generate_numerical_samples()
         self.text_data = self._generate_textual_samples()
         
-        # Create index mapping
+        # Store total counts
         self.total_numerical = len(self.numerical_data)
         self.total_text = len(self.text_data)
         self.total_samples = self.total_numerical + self.total_text
@@ -63,23 +73,27 @@ class NumericalEncodingDataset(Dataset):
     def _generate_numerical_samples(self) -> List[float]:
         samples = []
         for range_min, range_max in self.config.numerical_test_ranges:
-            # Linear space samples
+            # Ensure deterministic sample generation
+            samples_per_range = self.config.num_synthetic_samples // (len(self.config.numerical_test_ranges) * 2)
+            
+            # Linear space samples - using numpy's deterministic linspace
             linear_samples = np.linspace(
                 range_min, range_max, 
-                self.config.num_synthetic_samples // (len(self.config.numerical_test_ranges) * 2)
+                samples_per_range
             )
             samples.extend(linear_samples)
             
-            # Log space samples if applicable
+            # Log space samples if applicable - using numpy's deterministic logspace
             if range_min > 0 and range_max > 0:
                 log_samples = np.logspace(
                     np.log10(range_min),
                     np.log10(range_max),
-                    self.config.num_synthetic_samples // (len(self.config.numerical_test_ranges) * 2)
+                    samples_per_range
                 )
                 samples.extend(log_samples)
         
-        return samples
+        # Sort for consistency
+        return sorted(samples)
     
     def _generate_textual_samples(self) -> List[str]:
         contexts = {
@@ -91,18 +105,21 @@ class NumericalEncodingDataset(Dataset):
         }
         
         samples = []
-        for context_type, templates in contexts.items():
+        # Ensure deterministic order of contexts
+        for context_type in sorted(contexts.keys()):
+            templates = sorted(contexts[context_type])  # Sort templates for consistency
             for template in templates:
+                # Generate deterministic numbers for each context
                 if context_type == 'rating':
-                    numbers = np.random.uniform(1, 5, size=20)
+                    numbers = np.linspace(1, 5, 20)  # Deterministic range for ratings
                 elif context_type == 'price':
-                    numbers = np.random.lognormal(4, 1, size=20)
+                    numbers = np.logspace(0, 4, 20)  # Deterministic range for prices
                 elif context_type == 'quantity':
-                    numbers = np.random.randint(1, 100, size=20)
+                    numbers = np.linspace(1, 100, 20)  # Deterministic range for quantities
                 elif context_type == 'time':
-                    numbers = np.random.randint(1, 1000, size=20)
+                    numbers = np.linspace(1, 1000, 20)  # Deterministic range for time
                 elif context_type == 'percentage':
-                    numbers = np.random.uniform(0, 100, size=20)
+                    numbers = np.linspace(0, 100, 20)  # Deterministic range for percentages
                 
                 samples.extend([template.format(f"{num:.2f}") for num in numbers])
         
@@ -124,6 +141,157 @@ class NumericalEncodingEvaluator:
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.encoder.to(self.device)
+
+    
+    def evaluate_ordinal_preservation(self) -> float:
+        """Evaluate preservation of ordinal relationships within contexts"""
+        print("Evaluating ordinal preservation...")
+        
+        ordinal_sequences = [
+            ("rating", ["1 star", "2 stars", "3 stars", "4 stars", "5 stars"]),
+            ("price", ["$10", "$20", "$50", "$100", "$200"]),
+            ("quantity", ["5 units", "10 units", "20 units", "50 units", "100 units"])
+        ]
+        
+        ordinal_scores = []
+        for context, sequence in ordinal_sequences:
+            # Get embeddings for sequence
+            embeddings = []
+            for text in sequence:
+                emb = self.encoder.encode_number(text)
+                embeddings.append(emb.detach().cpu().numpy().squeeze())
+            embeddings = np.array(embeddings)
+            
+            # Compare consecutive pairs
+            correct_order = 0
+            total_pairs = len(embeddings) - 1
+            
+            for i in range(total_pairs):
+                # Calculate cosine similarity with next item
+                sim = np.dot(embeddings[i], embeddings[i+1]) / (
+                    np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[i+1])
+                )
+                # Check if similarity with next item is higher than with items further in sequence
+                if all(sim > np.dot(embeddings[i], embeddings[j]) / (
+                    np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j]))
+                    for j in range(i+2, len(embeddings))):
+                    correct_order += 1
+            
+            ordinal_scores.append(correct_order / total_pairs)
+        
+        return np.mean(ordinal_scores)
+    
+    def evaluate_interval_preservation(self) -> float:
+        """Evaluate preservation of interval relationships"""
+        print("Evaluating interval preservation...")
+        
+        # Test cases with equal intervals
+        interval_cases = [
+            [1, 2, 3, 4, 5],
+            [10, 20, 30, 40, 50],
+            [100, 200, 300, 400, 500]
+        ]
+        
+        interval_scores = []
+        for sequence in interval_cases:
+            embeddings = []
+            for num in sequence:
+                emb = self.encoder.encode_number(float(num))
+                embeddings.append(emb.detach().cpu().numpy().squeeze())
+            embeddings = np.array(embeddings)
+            
+            # Compare consecutive intervals
+            intervals = []
+            for i in range(len(embeddings)-1):
+                interval = np.linalg.norm(embeddings[i+1] - embeddings[i])
+                intervals.append(interval)
+            
+            # Calculate consistency of intervals
+            interval_std = np.std(intervals)
+            interval_mean = np.mean(intervals)
+            interval_scores.append(1 - (interval_std / interval_mean))
+        
+        return np.mean(interval_scores)
+    
+    def evaluate_cross_context_discrimination(self) -> float:
+        """Evaluate meaningful variations across contexts"""
+        print("Evaluating cross-context discrimination...")
+        
+        test_cases = [
+            ("5 stars", "5 units", "Similar number, different context"),
+            ("10 dollars", "10 minutes", "Similar number, different context"),
+            ("3 stars", "3 dollars", "Similar number, different context")
+        ]
+        
+        cross_context_scores = []
+        
+        for text1, text2, _ in test_cases:
+            emb1 = self.encoder.encode_number(text1)
+            emb2 = self.encoder.encode_number(text2)
+            
+            # Calculate cosine similarity
+            sim = np.dot(
+                emb1.detach().cpu().numpy().squeeze(),
+                emb2.detach().cpu().numpy().squeeze()
+            ) / (
+                np.linalg.norm(emb1.detach().cpu().numpy().squeeze()) *
+                np.linalg.norm(emb2.detach().cpu().numpy().squeeze())
+            )
+            
+            # We want embeddings to be different but not completely unrelated
+            # Score is highest when similarity is around 0.5
+            score = 1 - abs(0.5 - sim)
+            cross_context_scores.append(score)
+            
+        return np.mean(cross_context_scores)
+    
+    def evaluate_downstream_task(self) -> Dict[str, float]:
+        """Evaluate performance on synthetic downstream tasks"""
+        print("Evaluating downstream task performance...")
+        
+        # Generate synthetic data
+        contexts = ['rating', 'price', 'quantity']
+        numbers = [1, 2, 5, 10, 20, 50, 100]
+        
+        data = []
+        labels = []
+        embeddings = []
+        
+        for ctx_idx, context in enumerate(contexts):
+            for num in numbers:
+                if context == 'rating':
+                    text = f"{num} stars"
+                elif context == 'price':
+                    text = f"${num}"
+                else:
+                    text = f"{num} units"
+                    
+                emb = self.encoder.encode_number(text)
+                embeddings.append(emb.detach().cpu().numpy().squeeze())
+                labels.append(ctx_idx)
+                data.append(text)
+        
+        embeddings = np.array(embeddings)
+        labels = np.array(labels)
+        
+        # Classification task
+        X_train, X_test, y_train, y_test = train_test_split(
+            embeddings, labels, test_size=0.2, random_state=42
+        )
+        
+        clf = LogisticRegression(random_state=42)
+        clf.fit(X_train, y_train)
+        classification_score = clf.score(X_test, y_test)
+        
+        # Clustering task
+        kmeans = KMeans(n_clusters=len(contexts), random_state=42)
+        cluster_labels = kmeans.fit_predict(embeddings)
+        clustering_score = adjusted_rand_score(labels, cluster_labels)
+        
+        return {
+            'classification_accuracy': classification_score,
+            'clustering_score': clustering_score
+        }
     
     def evaluate_contextual_understanding(self, loader: DataLoader) -> Dict[str, float]:
         print("Evaluating contextual understanding...")
@@ -137,14 +305,14 @@ class NumericalEncodingEvaluator:
         try:
             context_embeddings = {}
             
-            # Define semantic test cases
-            semantic_test_cases = [
+            # Define semantic test cases (now ordered)
+            semantic_test_cases = sorted([
                 ("5 stars", "4 stars", "3 stars"),
                 ("$5", "$50", "$500"),
                 ("5 items", "50 items", "500 items"),
                 ("5 minutes", "50 minutes", "500 minutes"),
                 ("5%", "50%", "100%")
-            ]
+            ])
             
             # Collect embeddings by context
             for _, texts in loader:
@@ -177,15 +345,17 @@ class NumericalEncodingEvaluator:
                     labels = np.array(labels)
                     
                     if len(np.unique(labels)) > 1:
+                        # Set random_state for KMeans
                         kmeans = KMeans(
                             n_clusters=len(context_embeddings),
-                            random_state=self.config.seed
+                            random_state=self.config.seed,
+                            n_init=10  # Fixed number of initializations
                         )
                         pred_labels = kmeans.fit_predict(all_embeddings)
                         
                         results['clustering_quality'] = adjusted_rand_score(labels, pred_labels)
                         results['context_separation'] = silhouette_score(all_embeddings, labels)
-            
+
             # 2. Semantic Consistency
             semantic_scores = []
             for test_case in semantic_test_cases:
@@ -310,11 +480,24 @@ class NumericalEncodingEvaluator:
 
     def evaluate(self, loader: DataLoader) -> Dict[str, float]:
         """Run complete evaluation suite"""
+        # Original metrics
         numerical_results = self.evaluate_numerical_properties(loader)
         contextual_results = self.evaluate_contextual_understanding(loader)
         
-        return {**numerical_results, **contextual_results}
-
+        # New metrics
+        ordinal_score = self.evaluate_ordinal_preservation()
+        interval_score = self.evaluate_interval_preservation()
+        cross_context_score = self.evaluate_cross_context_discrimination()
+        downstream_results = self.evaluate_downstream_task()
+        
+        return {
+            **numerical_results,
+            **contextual_results,
+            'ordinal_preservation': ordinal_score,
+            'interval_preservation': interval_score,
+            'cross_context_discrimination': cross_context_score,
+            **downstream_results
+        }
     def visualize_results(self, results: Dict[str, float]):
         plt.figure(figsize=(12, 6))
         metrics = list(results.keys())

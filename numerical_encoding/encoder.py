@@ -23,84 +23,118 @@ class MagnitudeAwareEncoding(nn.Module):
     def __init__(self, config: EncoderConfig):
         super().__init__()
         self.config = config
-        self.embedding_dim = config.embedding_dim
+        self.embedding_dim = config.embedding_dim  # 768
         
-        # Enhanced magnitude embedding with better separation
+        # Direct magnitude representation for better relative distance
         self.magnitude_embedding = nn.Embedding(
-            config.num_magnitude_bins * 2,
-            self.embedding_dim
+            config.num_magnitude_bins * 2,  # 20 bins
+            self.embedding_dim  # [20, 768]
         )
         
-        # Add scale-specific embeddings
-        self.scale_embedding = nn.Embedding(
-            32,  # Number of different scales
-            self.embedding_dim
-        )
-        
-        # Enhanced preprocessing network
-        self.preprocess_net = nn.Sequential(
-            nn.Linear(4, self.embedding_dim),
-            nn.LayerNorm(self.embedding_dim),
-            nn.Dropout(config.dropout),
+        # Maintain successful scale embedding
+        self.scale_embedding = nn.Sequential(
+            nn.Linear(1, self.embedding_dim // 4),  # [batch, 1] -> [batch, 192]
+            nn.LayerNorm(self.embedding_dim // 4),
             nn.GELU(),
-            nn.Linear(self.embedding_dim, self.embedding_dim),
+            nn.Linear(self.embedding_dim // 4, self.embedding_dim)  # [batch, 192] -> [batch, 768]
+        )
+        
+        # Direct numerical feature processing
+        self.numerical_encoder = nn.Sequential(
+            nn.Linear(2, self.embedding_dim),  # [batch, 2] -> [batch, 768]
             nn.LayerNorm(self.embedding_dim),
             nn.GELU()
         )
         
-        # Initialize bin boundaries for better separation
+        # Contextual feature processing
+        self.contextual_encoder = nn.Sequential(
+            nn.Linear(2, self.embedding_dim),  # [batch, 2] -> [batch, 768]
+            nn.LayerNorm(self.embedding_dim),
+            nn.GELU()
+        )
+        
+        # Effective bin boundaries from previous version
         bounds = torch.cat([
-            torch.tensor([-float('inf'), 0]),
-            torch.logspace(-15, -10, config.num_magnitude_bins // 6),
-            torch.logspace(-10, -5, config.num_magnitude_bins // 6),
-            torch.logspace(-5, 0, config.num_magnitude_bins // 6),
-            torch.logspace(0, 5, config.num_magnitude_bins // 6),
-            torch.logspace(5, 10, config.num_magnitude_bins // 6),
-            torch.logspace(10, 15, config.num_magnitude_bins // 6)
+            torch.tensor([-float('inf')]),
+            -torch.logspace(0, 15, config.num_magnitude_bins - 1),
+            torch.tensor([0.0]),
+            torch.logspace(0, 15, config.num_magnitude_bins - 1)
         ])
         self.register_buffer('bin_boundaries', torch.unique(bounds))
         
-        # Learnable parameters
+        # Learnable scaling with careful initialization
         self.magnitude_scale = nn.Parameter(torch.ones(config.num_magnitude_bins * 2))
         self.temperature = nn.Parameter(torch.tensor(1.0))
         
+        # Feature attention for semantic aspects
+        self.feature_attention = nn.MultiheadAttention(
+            embed_dim=self.embedding_dim,
+            num_heads=8,
+            dropout=config.dropout,
+            batch_first=True
+        )
+        
     def forward(self, number: torch.Tensor) -> torch.Tensor:
         if number.dim() == 1:
-            number = number.unsqueeze(0)
+            number = number.unsqueeze(0)  # [batch, 1]
         
-        # Basic features with safe handling
-        signs = torch.sign(number)
-        abs_num = torch.abs(number)
-        log_abs = torch.log1p(abs_num + 1e-15)
-        scale_factor = torch.floor(torch.log10(abs_num + 1e-15))
+        # Basic numerical features
+        signs = torch.sign(number)  # [batch, 1]
+        abs_num = torch.abs(number)  # [batch, 1]
+        log_abs = torch.log1p(abs_num)  # [batch, 1]
+        scale_factor = torch.floor(torch.log10(abs_num + 1e-10))  # [batch, 1]
         
-        # Get scale embedding indices (shifted to be positive)
-        scale_indices = (scale_factor + 16).long().clamp(0, 31)
-        scale_emb = self.scale_embedding(scale_indices)
+        # Numerical relationship features
+        numerical_features = torch.cat([
+            number / (torch.max(torch.abs(number)) + 1e-10),  # Normalized raw value
+            log_abs / (torch.max(log_abs) + 1e-10)  # Normalized log value
+        ], dim=-1)  # [batch, 2]
         
-        # Prepare features
-        features = torch.cat([
-            log_abs,
+        # Contextual features
+        contextual_features = torch.cat([
             signs,
-            number,
-            scale_factor
-        ], dim=-1)
+            scale_factor / 16.0  # Normalized scale
+        ], dim=-1)  # [batch, 2]
         
-        # Process features
-        numerical_features = self.preprocess_net(features)
+        # Process features - ensure all outputs are [batch, 768]
+        num_encoding = self.numerical_encoder(numerical_features)  # [batch, 768]
+        ctx_encoding = self.contextual_encoder(contextual_features)  # [batch, 768]
         
-        # Get bin indices with smooth transitions
+        # Get magnitude embedding
         bin_idx = torch.bucketize(
-            log_abs,
-            torch.log1p(self.bin_boundaries)
-        ).clamp(0, self.config.num_magnitude_bins * 2 - 1)
+            number,
+            self.bin_boundaries
+        ).clamp(0, self.config.num_magnitude_bins * 2 - 1)  # [batch, 1]
+        magnitude_emb = self.magnitude_embedding(bin_idx.squeeze(-1))  # [batch, 768]
         
-        # Magnitude embedding with scaling
-        magnitude_emb = self.magnitude_embedding(bin_idx.squeeze(-1))
-        scale = F.softplus(self.magnitude_scale[bin_idx.squeeze(-1)] / self.temperature).unsqueeze(-1)
+        # Get scale embedding and ensure it's [batch, 768]
+        scale_emb = self.scale_embedding(scale_factor.unsqueeze(-1)).squeeze(1)  # [batch, 768]
         
-        # Combine embeddings with scale information
-        output = (magnitude_emb + numerical_features + scale_emb) * scale
+        # Create feature sequence [batch, 4, 768]
+        features = torch.stack([
+            num_encoding,          # [batch, 768]
+            magnitude_emb,         # [batch, 768]
+            scale_emb,             # [batch, 768]
+            ctx_encoding           # [batch, 768]
+        ], dim=1)  # Results in [batch, 4, 768]
+        
+         # Apply attention - MultiheadAttention expects [batch, seq_len, embedding_dim]
+        attn_output, _ = self.feature_attention(
+            features,  # [batch, 4, 768]
+            features,  # [batch, 4, 768]
+            features   # [batch, 4, 768]
+        )  # Output: [batch, 4, 768]
+        
+        # Weighted pooling
+        weights = torch.tensor([0.4, 0.3, 0.2, 0.1], device=number.device)
+        output = (attn_output * weights.view(1, 4, 1)).sum(dim=1)  # [batch, 768]
+        
+        # Apply magnitude scaling
+        scale = F.softplus(
+            self.magnitude_scale[bin_idx.squeeze(-1)] / self.temperature
+        ).unsqueeze(-1)  # [batch, 1]
+        
+        output = output * scale  # [batch, 768]
         
         # Clean up any NaN values
         output = torch.where(
@@ -109,8 +143,8 @@ class MagnitudeAwareEncoding(nn.Module):
             output
         )
         
-        return F.normalize(output, p=2, dim=-1)
-
+        return F.normalize(output, p=2, dim=-1)  # [batch, 768]
+    
 class PeriodicPositionalEncoding(nn.Module):
     def __init__(self, config: EncoderConfig):
         super().__init__()
