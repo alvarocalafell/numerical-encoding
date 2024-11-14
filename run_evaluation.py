@@ -10,13 +10,15 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from rich.console import Console
-from rich.progress import Progress
+from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
+from rich.table import Table
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, Any, Optional
 
 from numerical_encoding import (
     NumericalEncoder,
+    EncoderConfig,
     EvaluationConfig,
     NumericalEncodingDataset,
     NumericalEncodingEvaluator
@@ -27,11 +29,7 @@ from torch.utils.data import DataLoader
 console = Console()
 
 def set_all_seeds(seed: int) -> None:
-    """Set all random seeds for reproducibility.
-    
-    Args:
-        seed: Random seed value
-    """
+    """Set all random seeds for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -43,16 +41,13 @@ def create_evaluation_dataset(
     config: EvaluationConfig,
     generator: torch.Generator
 ) -> DataLoader:
-    """Create evaluation dataset and dataloader.
-    
-    Args:
-        config: Evaluation configuration
-        generator: PyTorch random number generator
-        
-    Returns:
-        DataLoader: Configured data loader for evaluation
-    """
+    """Create evaluation dataset and dataloader."""
     dataset = NumericalEncodingDataset(config)
+    
+    # Add debug logging
+    console.print(f"Generated {len(dataset)} total samples")
+    console.print(f"Numerical samples: {dataset.total_numerical}")
+    console.print(f"Text samples: {dataset.total_text}")
     
     return DataLoader(
         dataset,
@@ -63,67 +58,93 @@ def create_evaluation_dataset(
         generator=generator,
         worker_init_fn=lambda x: np.random.seed(config.seed)
     )
-
-def visualize_results(
-    results: Dict[str, float],
-    save_path: Optional[Path] = None
-) -> None:
-    """Create and save visualization of evaluation results.
     
-    Args:
-        results: Dictionary of evaluation results
-        save_path: Optional path to save the visualization
-    """
-    plt.figure(figsize=(12, 6))
+def display_results_table(results: Dict[str, float]) -> None:
+    """Display evaluation results in a formatted table."""
+    if not results:
+        console.print("[red]No results to display[/red]")
+        return
+        
+    table = Table(title="Numerical Encoding Evaluation Results")
+    table.add_column("Category", style="cyan", no_wrap=True)
+    table.add_column("Metric", style="magenta")
+    table.add_column("Score", justify="right", style="green")
     
-    # Create color palette
-    colors = sns.color_palette("husl", len(results))
+    # Group metrics by category
+    categories = {
+        "Numerical": {
+            "prefix": "numerical",
+            "metrics": ["relative_distance", "scale_invariance", "sign_preservation",
+                       "magnitude_preservation", "numerical_continuity", "interval_preservation"]
+        },
+        "Contextual": {
+            "prefix": "contextual",
+            "metrics": ["context_separation", "cross_context_understanding", 
+                       "semantic_preservation"]
+        },
+        "Downstream": {
+            "prefix": "downstream",
+            "metrics": ["classification_performance", "clustering_quality", 
+                       "semantic_similarity"]
+        }
+    }
     
-    # Create bar plot
-    bars = plt.bar(range(len(results)), 
-                  list(results.values()), 
-                  color=colors)
+    # Process each category
+    for category_name, category_info in categories.items():
+        category_metrics = []
+        
+        # Get all metrics for this category
+        for metric in category_info["metrics"]:
+            full_metric_name = metric
+            if full_metric_name in results:
+                category_metrics.append((metric, results[full_metric_name]))
+        
+        if category_metrics:
+            # Add category header
+            table.add_row(
+                f"[bold]{category_name}[/bold]",
+                "",
+                "",
+                style="bright_black"
+            )
+            
+            # Add individual metrics
+            for metric_name, score in category_metrics:
+                name = metric_name.replace("_", " ").title()
+                if not np.isnan(score):
+                    table.add_row(
+                        "",
+                        name,
+                        f"{score:.3f}"
+                    )
+            
+            # Calculate and add category average
+            valid_scores = [score for _, score in category_metrics if not np.isnan(score)]
+            if valid_scores:
+                avg_score = np.mean(valid_scores)
+                table.add_row(
+                    "",
+                    "[bold italic]Category Average[/bold italic]",
+                    f"[bold italic]{avg_score:.3f}[/bold italic]",
+                    style="bright_black"
+                )
+            
+            # Add separator
+            table.add_row("", "", "")
     
-    # Customize plot
-    plt.xticks(range(len(results)), 
-               list(results.keys()), 
-               rotation=45, 
-               ha='right')
+    # Add overall score if present and valid
+    if "overall_score" in results and not np.isnan(results["overall_score"]):
+        table.add_row(
+            "[bold red]Overall[/bold red]",
+            "[bold red]Final Score[/bold red]",
+            f"[bold red]{results['overall_score']:.3f}[/bold red]"
+        )
     
-    plt.title('Numerical Encoding Evaluation Results', 
-              fontsize=14, 
-              pad=20)
-    
-    plt.ylabel('Score', fontsize=12)
-    
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., 
-                height,
-                f'{height:.3f}',
-                ha='center', 
-                va='bottom',
-                rotation=0)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path)
-        console.print(f"[green]Results visualization saved to {save_path}[/green]")
-    
-    plt.close()
+    console.print(table)
 
 def run_evaluation(args: argparse.Namespace) -> Dict[str, float]:
-    """Run complete evaluation suite.
-    
-    Args:
-        args: Command line arguments
-        
-    Returns:
-        Dict[str, float]: Evaluation results
-    """
-    console.print("[bold blue]Initializing Numerical Encoding Evaluation[/bold blue]")
+    """Run complete evaluation suite."""
+    console.rule("[bold blue]Numerical Encoding Evaluation[/bold blue]")
     
     # Initialize configurations
     config = EvaluationConfig(
@@ -139,50 +160,58 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, float]:
     generator = torch.Generator()
     generator.manual_seed(config.seed)
     
-    with Progress() as progress:
+    with Progress(
+        SpinnerColumn(),
+        *Progress.get_default_columns(),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
+        
         # Initialize encoder
-        task1 = progress.add_task("[cyan]Initializing encoder...", total=1)
+        encoder_task = progress.add_task(
+            "[cyan]Initializing encoder...",
+            total=1
+        )
         encoder = NumericalEncoder()
-        encoder.tokenizer.init_weights = False
-        progress.update(task1, completed=1)
+        progress.update(encoder_task, completed=1)
         
         # Create dataset
-        task2 = progress.add_task("[cyan]Creating evaluation dataset...", total=1)
+        data_task = progress.add_task(
+            "[cyan]Creating evaluation dataset...",
+            total=1
+        )
         loader = create_evaluation_dataset(config, generator)
-        progress.update(task2, completed=1)
+        progress.update(data_task, completed=1)
         
         # Initialize evaluator
-        task3 = progress.add_task("[cyan]Initializing evaluator...", total=1)
+        eval_init_task = progress.add_task(
+            "[cyan]Initializing evaluator...",
+            total=1
+        )
         evaluator = NumericalEncodingEvaluator(encoder, config)
-        progress.update(task3, completed=1)
+        progress.update(eval_init_task, completed=1)
         
-        # Run evaluation
-        task4 = progress.add_task("[cyan]Running evaluation...", total=1)
-        results = evaluator.evaluate(loader)
-        progress.update(task4, completed=1)
+        # Run complete evaluation
+        eval_task = progress.add_task(
+            "[cyan]Running evaluation...",
+            total=1
+        )
+        results = evaluator.evaluate(loader)  # Use the main evaluate method
+        progress.update(eval_task, completed=1)
     
-    # Print results
-    console.print("\n[bold green]Evaluation Results:[/bold green]")
-    for metric, value in results.items():
-        console.print(f"{metric}: {value:.3f}")
+    # Display results
+    console.print("\n")
+    if results:  # Only display if we have results
+        display_results_table(results)
+    else:
+        console.print("[red]No results were generated during evaluation.[/red]")
     
     # Save results
-    if args.save_results:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.save_results and results:
         save_dir = Path("results")
         save_dir.mkdir(exist_ok=True)
-        
-        # Save visualization
-        vis_path = save_dir / f"evaluation_results_{timestamp}.png"
-        visualize_results(results, vis_path)
-        
-        # Save numeric results
-        results_path = save_dir / f"evaluation_results_{timestamp}.txt"
-        with open(results_path, "w") as f:
-            for metric, value in results.items():
-                f.write(f"{metric}: {value:.3f}\n")
-        
-        console.print(f"[green]Results saved to {results_path}[/green]")
+        evaluator.save_results(save_dir)
+        console.print(f"\n[green]Results saved in {save_dir}[/green]")
     
     return results
 
