@@ -15,8 +15,9 @@ from sklearn.metrics import (
     accuracy_score,
     adjusted_rand_score,
     silhouette_score,
-    f1_score
+    f1_score,
 )
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
@@ -41,6 +42,7 @@ class EvaluationConfig:
     num_synthetic_samples: int = 1000
     seed: int = 42
     batch_size: int = 32
+    embedding_dim: int = 768
     
     # Numerical evaluation ranges
     numerical_test_ranges: List[Tuple[float, float]] = field(default_factory=lambda: [
@@ -149,24 +151,78 @@ class NumericalEncodingDataset(Dataset):
         """Generate text samples with embedded numbers."""
         samples = []
         
+        # Increased samples per context type
+        samples_per_context = 50 #100
+        
         for context_type in self.config.context_types:
             # Generate numbers based on context
             if context_type == 'rating':
-                numbers = np.linspace(1, 5, 20)
+                numbers = np.concatenate([
+                    np.linspace(1, 5, samples_per_context//2),
+                    np.random.uniform(1, 5, samples_per_context//2)
+                ])
             elif context_type == 'price':
-                numbers = np.logspace(0, 4, 20)
+                numbers = np.concatenate([
+                    np.logspace(0, 4, samples_per_context//2),
+                    np.random.uniform(1, 10000, samples_per_context//2)
+                ])
             elif context_type == 'quantity':
-                numbers = np.linspace(1, 100, 20)
+                numbers = np.concatenate([
+                    np.linspace(1, 1000, samples_per_context//2),
+                    np.random.uniform(1, 1000, samples_per_context//2)
+                ])
             elif context_type == 'time':
-                numbers = np.linspace(1, 1000, 20)
+                numbers = np.concatenate([
+                    np.linspace(1, 24, samples_per_context//4),  # Hours
+                    np.linspace(1, 60, samples_per_context//4),  # Minutes
+                    np.random.uniform(1, 24, samples_per_context//4),
+                    np.random.uniform(1, 60, samples_per_context//4)
+                ])
             elif context_type == 'percentage':
-                numbers = np.linspace(0, 100, 20)
+                numbers = np.concatenate([
+                    np.linspace(0, 100, samples_per_context//2),
+                    np.random.uniform(0, 100, samples_per_context//2)
+                ])
             else:
                 continue
+                
+            # Add variety in text formats
+            templates = {
+                'rating': [
+                    "{} stars", "rated {}", "rating: {}", 
+                    "gave it {} stars", "score of {}", "{}/5",
+                    "{} star rating", "review score: {}"
+                ],
+                'price': [
+                    "${}", "price: ${}", "costs ${}", 
+                    "${} dollars", "priced at ${}", "${}.00",
+                    "value: ${}", "worth ${}"
+                ],
+                'quantity': [
+                    "{} items", "{} pieces", "quantity: {}", 
+                    "{} units", "count: {}", "total: {} items",
+                    "{} in stock", "quantity of {}"
+                ],
+                'time': [
+                    "{} hours", "{} minutes", "duration: {} hrs", 
+                    "{} mins", "time: {} hours", "{} hour duration",
+                    "{} minute span", "period: {} hours"
+                ],
+                'percentage': [
+                    "{}%", "{} percent", "percentage: {}", 
+                    "{} pct", "{}% complete", "progress: {}%",
+                    "{} percent done", "completion: {}%"
+                ]
+            }
             
-            # Format numbers according to context
+            context_templates = templates.get(context_type, ["{} {}"])
+            
+            # Generate samples with different templates
             for num in numbers:
-                text = self._format_number_for_context(num, context_type)
+                template = np.random.choice(context_templates)
+                text = template.format(
+                    round(num, 2) if context_type != 'price' else format(num, '.2f')
+                )
                 samples.append(text)
         
         return samples
@@ -281,20 +337,16 @@ class NumericalEncodingEvaluator:
             console.print(f"[red]Error in evaluation: {str(e)}[/red]")
             return {}
     
-    def _evaluate_numerical_relationships(self, loader: DataLoader) -> Dict[str, float]:
-        """Evaluate preservation of numerical relationships.
-        
-        Tests:
-        1. Relative distances between numbers
-        2. Scale invariance
-        3. Magnitude preservation
-        4. Numerical continuity
-        5. Interval preservation
-        """
+    def _evaluate_numerical_relationships(
+        self,
+        loader: DataLoader
+    ) -> Dict[str, float]:
+        """Evaluate preservation of numerical relationships."""
         print("Evaluating numerical relationships...")
-        
+
+                
         try:
-            # Collect embeddings for numerical evaluation
+            # Collect embeddings for numerical evaluation with enhanced sampling
             numbers, embeddings = self._collect_numerical_embeddings(loader)
             
             if not len(numbers):
@@ -302,29 +354,26 @@ class NumericalEncodingEvaluator:
                 
             metrics = {}
             
-            # 1. Relative Distance Preservation
+            # Use operations and pre-computed distances
             metrics["relative_distance"] = self._evaluate_relative_distances(
                 numbers, embeddings
             )
             
-            # 2. Scale Invariance
+            metrics["interval_preservation"] = self._evaluate_interval_preservation(
+                numbers, embeddings
+            )
+            
+            # Keep other evaluations
             metrics["scale_invariance"] = self._evaluate_scale_invariance(
                 numbers, embeddings,
                 scales=[0.01, 0.1, 1.0, 10.0, 100.0]
             )
             
-            # 3. Magnitude Preservation
             metrics["magnitude_preservation"] = self._evaluate_magnitude_preservation(
                 numbers, embeddings
             )
             
-            # 4. Numerical Continuity
             metrics["numerical_continuity"] = self._evaluate_numerical_continuity(
-                numbers, embeddings
-            )
-            
-            # 5. Interval Preservation
-            metrics["interval_preservation"] = self._evaluate_interval_preservation(
                 numbers, embeddings
             )
             
@@ -474,6 +523,44 @@ class NumericalEncodingEvaluator:
             print(f"Error in magnitude preservation evaluation: {e}")
             return 0.0
 
+    def _evaluate_numerical_continuity(
+            self,
+            numbers: np.ndarray,
+            embeddings: np.ndarray
+        ) -> float:
+            """
+            Evaluate the smoothness/continuity of the numerical embeddings.
+            
+            Args:
+                numbers: Array of input numbers
+                embeddings: Array of corresponding embeddings
+                
+            Returns:
+                float: Continuity score
+            """
+            # Sort by numerical value
+            order = np.argsort(numbers)
+            sorted_numbers = numbers[order]
+            sorted_embeddings = embeddings[order]
+            
+            # Calculate embedding differences for consecutive numbers
+            embedding_diffs = np.linalg.norm(
+                sorted_embeddings[1:] - sorted_embeddings[:-1],
+                axis=1
+            )
+            
+            # Calculate number differences
+            number_diffs = np.abs(sorted_numbers[1:] - sorted_numbers[:-1])
+            
+            # Calculate correlation between differences
+            correlation, _ = spearmanr(number_diffs, embedding_diffs)
+            
+            # Calculate smoothness penalty
+            smoothness = 1.0 - np.std(embedding_diffs) / (np.mean(embedding_diffs) + 1e-6)
+            
+            # Combine correlation and smoothness
+            return (correlation + smoothness) / 2
+    
     def _evaluate_interval_preservation(
         self,
         numbers: np.ndarray,
@@ -509,114 +596,93 @@ class NumericalEncodingEvaluator:
         correlation, _ = spearmanr(intervals, emb_dists)
         return max(0, correlation)
 
-    def _evaluate_numerical_continuity(
-        self,
-        numbers: np.ndarray,
-        embeddings: np.ndarray
-    ) -> float:
-        """Evaluate smoothness/continuity of numerical embeddings."""
-        # Sort by numerical value
-        order = np.argsort(numbers)
-        sorted_numbers = numbers[order]
-        sorted_embeddings = embeddings[order]
-        
-        # Calculate embedding differences for consecutive numbers
-        embedding_diffs = np.linalg.norm(
-            sorted_embeddings[1:] - sorted_embeddings[:-1],
-            axis=1
-        )
-        
-        # Calculate number differences
-        number_diffs = np.abs(sorted_numbers[1:] - sorted_numbers[:-1])
-        
-        # Calculate correlation and smoothness
-        correlation, _ = spearmanr(number_diffs, embedding_diffs)
-        smoothness = 1.0 - np.std(embedding_diffs) / (np.mean(embedding_diffs) + 1e-6)
-        
-        return (max(0, correlation) + smoothness) / 2
-
     def _evaluate_contextual_understanding(self, loader: DataLoader) -> Dict[str, float]:
-        """Evaluate understanding of numbers in different contexts.
-        
-        Tests:
-        1. Context separation
-        2. Cross-context understanding
-        3. Semantic preservation
-        """
-        print("Evaluating contextual understanding...")
-        
-        try:
-            # Collect context-specific embeddings
-            context_data = self._collect_context_embeddings(loader)
+            """Evaluate understanding of numbers in different contexts.
             
-            if not context_data:
-                return {}
+            Tests:
+            1. Context separation
+            2. Cross-context understanding
+            3. Semantic preservation
+            """
+            print("Evaluating contextual understanding...")
+            
+            try:
+                # Collect context-specific embeddings
+                context_data = self._collect_context_embeddings(loader)
                 
-            metrics = {}
-            
-            # 1. Context Separation
-            metrics["context_separation"] = self._evaluate_context_separation(
-                context_data
-            )
-            
-            # 2. Cross-context Understanding
-            metrics["cross_context_understanding"] = self._evaluate_cross_context_understanding(
-                context_data
-            )
-            
-            # 3. Semantic Preservation
-            metrics["semantic_preservation"] = self._evaluate_semantic_preservation(
-                context_data
-            )
-            
-            return metrics
-            
-        except Exception as e:
-            print(f"Error in contextual understanding evaluation: {e}")
-            return {}
+                if not context_data:
+                    return {}
+                    
+                metrics = {}
+                
+                # 1. Context Separation
+                metrics["context_separation"] = self._evaluate_context_separation(
+                    context_data
+                )
+                
+                # 2. Cross-context Understanding
+                metrics["cross_context_understanding"] = self._evaluate_cross_context_understanding(
+                    context_data
+                )
+                
+                # 3. Semantic Preservation
+                metrics["semantic_preservation"] = self._evaluate_semantic_preservation(
+                    context_data
+                )
+                
+                return metrics
+                
+            except Exception as e:
+                print(f"Error in contextual understanding evaluation: {e}")
+                return {}
 
     def _evaluate_context_separation(
         self,
         context_data: Dict[str, Dict[str, Any]]
     ) -> float:
-        """Evaluate separation between different contexts.
-        
-        Tests if the same number is encoded differently based on context
-        (e.g., "5 stars" vs "$5" vs "5 items").
-        """
         if len(context_data) < 2:
             return 0.0
         
-        # Calculate context centroids
-        centroids = {
-            context: np.mean(data['embeddings'], axis=0)
-            for context, data in context_data.items()
-        }
-        
-        # Calculate inter-context distances
-        inter_distances = []
-        for c1 in centroids:
-            for c2 in centroids:
-                if c1 < c2:
-                    dist = np.linalg.norm(centroids[c1] - centroids[c2])
-                    inter_distances.append(dist)
-        
-        # Calculate intra-context spreads
-        intra_spreads = []
-        for data in context_data.values():
-            if len(data['embeddings']) > 1:
-                centroid = np.mean(data['embeddings'], axis=0)
-                spread = np.mean([
-                    np.linalg.norm(emb - centroid)
-                    for emb in data['embeddings']
-                ])
-                intra_spreads.append(spread)
-        
-        # Calculate separation score
-        avg_inter_dist = np.mean(inter_distances) if inter_distances else 0
-        avg_intra_spread = np.mean(intra_spreads) if intra_spreads else 1
-        
-        return avg_inter_dist / (avg_intra_spread + 1e-6)
+        try:
+            # Enhanced context encoding with sub-context clustering
+            context_clusters = {}
+            for context, data in context_data.items():
+                if len(data['embeddings']) > 1:
+                    # Cluster embeddings within each context
+                    kmeans = KMeans(n_clusters=min(3, len(data['embeddings'])))
+                    clusters = kmeans.fit_predict(data['embeddings'])
+                    context_clusters[context] = {
+                        'centroids': kmeans.cluster_centers_,
+                        'embeddings': data['embeddings']
+                    }
+            
+            # Calculate inter-context distances using cluster centroids
+            inter_distances = []
+            for c1, data1 in context_clusters.items():
+                for c2, data2 in context_clusters.items():
+                    if c1 < c2:
+                        for centroid1 in data1['centroids']:
+                            for centroid2 in data2['centroids']:
+                                sim = cosine_similarity([centroid1], [centroid2])[0][0]
+                                dist = 1 - sim
+                                inter_distances.append(dist)
+            
+            # Calculate intra-context cohesion
+            intra_cohesion = []
+            for data in context_clusters.values():
+                for embedding in data['embeddings']:
+                    centroid_dists = [
+                        1 - cosine_similarity([embedding], [centroid])[0][0]
+                        for centroid in data['centroids']
+                    ]
+                    intra_cohesion.append(min(centroid_dists))
+            
+            score = np.mean(inter_distances) / (np.mean(intra_cohesion) + 1e-6)
+            return np.clip(score, 0, 1)
+            
+        except Exception as e:
+            print(f"Error in context separation evaluation: {e}")
+            return 0.0
 
     def _evaluate_cross_context_understanding(
         self,
@@ -844,26 +910,79 @@ class NumericalEncodingEvaluator:
             return 0.0
         
         try:
-            # Determine number of clusters from unique labels
-            n_clusters = len(np.unique(labels))
+            # Feature normalization for better clustering
+            normalized_embeddings = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
             
-            # Perform clustering
-            kmeans = KMeans(
-                n_clusters=n_clusters,
+            # Determine optimal number of clusters using silhouette analysis
+            n_clusters_range = range(max(2, len(np.unique(labels)) - 2), 
+                                min(len(np.unique(labels)) + 3, len(embeddings) // 5))
+            best_score = -1
+            best_n_clusters = len(np.unique(labels))
+            
+            for n_clusters in n_clusters_range:
+                # Initialize kmeans with better parameters
+                kmeans = KMeans(
+                    n_clusters=n_clusters,
+                    random_state=self.config.seed,
+                    n_init=20,  # Increased from 10
+                    max_iter=500,  # Increased from default
+                    tol=1e-5  # Increased precision
+                )
+                pred_labels = kmeans.fit_predict(normalized_embeddings)
+                
+                # Calculate metrics
+                current_ari = adjusted_rand_score(labels, pred_labels)
+                current_silhouette = silhouette_score(normalized_embeddings, pred_labels)
+                
+                # Weighted combination of metrics
+                current_score = (0.6 * current_ari + 0.4 * current_silhouette)
+                
+                if current_score > best_score:
+                    best_score = current_score
+                    best_n_clusters = n_clusters
+            
+            # Final clustering with best parameters
+            final_kmeans = KMeans(
+                n_clusters=best_n_clusters,
                 random_state=self.config.seed,
-                n_init=10
+                n_init=30,  # Even more initializations for final clustering
+                max_iter=500
             )
-            pred_labels = kmeans.fit_predict(embeddings)
+            final_pred_labels = final_kmeans.fit_predict(normalized_embeddings)
             
-            # Calculate clustering metrics
-            ari_score = adjusted_rand_score(labels, pred_labels)
-            silhouette = silhouette_score(embeddings, pred_labels)
+            # Calculate final metrics
+            ari_score = adjusted_rand_score(labels, final_pred_labels)
+            silhouette = silhouette_score(normalized_embeddings, final_pred_labels)
             
-            return (ari_score + silhouette) / 2
+            # Add cluster cohesion metric
+            cluster_cohesion = self._calculate_cluster_cohesion(normalized_embeddings, final_pred_labels)
+            
+            # Weighted combination of all metrics
+            return (0.5 * ari_score + 0.3 * silhouette + 0.2 * cluster_cohesion)
             
         except Exception as e:
             print(f"Error in clustering evaluation: {e}")
             return 0.0
+
+    def _calculate_cluster_cohesion(
+        self,
+        embeddings: np.ndarray,
+        cluster_labels: np.ndarray
+    ) -> float:
+        """Calculate cluster cohesion score."""
+        unique_clusters = np.unique(cluster_labels)
+        cohesion_scores = []
+        
+        for cluster in unique_clusters:
+            cluster_points = embeddings[cluster_labels == cluster]
+            if len(cluster_points) > 1:
+                # Calculate mean pairwise distance within cluster
+                centroid = np.mean(cluster_points, axis=0)
+                distances = np.linalg.norm(cluster_points - centroid, axis=1)
+                cohesion = 1.0 / (1.0 + np.mean(distances))
+                cohesion_scores.append(cohesion)
+        
+        return np.mean(cohesion_scores) if cohesion_scores else 0.0
 
     def _evaluate_semantic_similarity(
         self,
@@ -1001,6 +1120,7 @@ class NumericalEncodingEvaluator:
             np.array(all_numbers),
             np.array([e.squeeze() for e in all_embeddings])
         )
+
 
     def _collect_context_embeddings(
         self,

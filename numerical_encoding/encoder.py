@@ -1,17 +1,20 @@
+"""
+Main encoder module for handling numerical data in various contexts.
+Integrates magnitude-aware encoding, periodic encoding, and text-number attention
+to create unified representations.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DistilBertTokenizer, DistilBertModel
 import math
-from typing import Union, Tuple, Optional
+from typing import Union, Tuple, List
 
 from .config import EncoderConfig
 from .utils import extract_numbers_with_positions, get_context_type
 
-"""
-Attention mechanisms for numerical encoding.
-Provides specialized attention modules for handling numerical and textual data.
-"""
+
 
 class ScaledDotProductAttention(nn.Module):
     """
@@ -468,21 +471,6 @@ class TextNumberAttention(nn.Module):
         output = self.combine_net(combined)  # [batch, 768]
         
         return F.normalize(output, dim=-1)
-
-"""
-Main encoder module for handling numerical data in various contexts.
-Integrates magnitude-aware encoding, periodic encoding, and text-number attention
-to create unified representations.
-"""
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import DistilBertTokenizer, DistilBertModel
-from typing import Union, Optional, List, Tuple
-
-from .config import EncoderConfig
-from .utils import extract_numbers_with_positions
 
 class NumericalEncoder(nn.Module):
     """
