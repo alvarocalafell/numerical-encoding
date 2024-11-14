@@ -152,7 +152,7 @@ class NumericalEncodingDataset(Dataset):
         samples = []
         
         # Increased samples per context type
-        samples_per_context = 50 #100
+        samples_per_context = 100
         
         for context_type in self.config.context_types:
             # Generate numbers based on context
